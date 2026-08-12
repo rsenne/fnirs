@@ -5,6 +5,8 @@ data_overview.md
 data/
 results/
 figures/
+*.svg
+*.png
 *.pkl
 *.npz
 *.nc

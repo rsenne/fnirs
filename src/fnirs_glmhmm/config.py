@@ -8,7 +8,11 @@ DATASET_ROOT = Path(os.environ.get("GRADCPT_ROOT", "/projectnb/nphfnirs/s/datase
 # Output of the cedalion pipeline: one pickle per subject per preprocessing variant.
 DERIV_ROOT = DATASET_ROOT / "derivatives/cedalion/pipeline_reorder/processed_data"
 
-PARCEL_FILE_TEMPLATE = "{sub}_adot-probe_spatialdim-vertex_IR_ts_{variant}_IR-1e-5_v26.pkl"
+# Several variants sit side by side in each subject folder; this is the adot-probe,
+# lR-1e-5, v26 one. 21 of the 23 subject folders have it.
+PARCEL_FILE_TEMPLATE = (
+    "{sub}_task-gradCPT_adot-probe_spatialdim-vertex_IR_ts_{variant}_lR-1e-5_v26.pkl"
+)
 
 # ols was TDDR + 0.5 Hz lowpass before projection to parcel space; ar_irls was raw.
 # Laura can confirm this

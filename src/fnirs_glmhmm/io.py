@@ -10,10 +10,18 @@ import xarray as xr
 from fnirs_glmhmm import config
 
 
-def subject_ids(deriv_root: Path | None = None) -> list[str]:
-    """All sub-xx directories that actually exist, sorted numerically."""
+def subject_ids(variant: str = "ols", deriv_root: Path | None = None) -> list[str]:
+    """Subjects that actually have the parcel timeseries, sorted numerically.
+
+    A couple of subject folders exist without the file we want, so check rather
+    than trusting the directory listing.
+    """
     root = Path(deriv_root or config.DERIV_ROOT)
-    subs = [p.name for p in root.glob("sub-*") if p.is_dir()]
+    subs = [
+        p.name
+        for p in root.glob("sub-*")
+        if p.is_dir() and parcel_path(p.name, variant, root).exists()
+    ]
     return sorted(subs, key=lambda s: int(re.sub(r"\D", "", s) or 0))
 
 

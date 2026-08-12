@@ -17,13 +17,25 @@ That creates `.venv` with everything pinned in `uv.lock`. Run things with
 src/fnirs_glmhmm/
   config.py    dataset paths and constants
   io.py        parcel timeseries, event tables, eyetracking
-  behavior.py  VTC smoothing and in/out-of-zone labels
+  behavior.py  VTC smoothing and the classic median-split zone labels
+  zones.py     HMM-derived zones, the replacement for the median split
   model.py     dynamax GLM-HMM wrappers
+  plotting.py  shared figure style and palette
+scripts/       batch jobs that write to results/
+  fit_zones.py     per-subject zone HMMs and the BIC sweep
+  make_figdata.py  tidy CSVs for the figures, run before scripts/figures/
+  figures/         one script per figure, reads results/figdata/
 notebooks/     marimo notebooks (plain .py, diffable)
 tests/
 ```
 
-Notebooks are marimo, so they're regular Python files and review like code:
+`scripts/fit_zones.py` fits every subject and scores the HMM zones against the
+median split on commission errors. One process per subject, sized off `NSLOTS`.
+
+Results and analysis notes live in `results/findings.md`, gitignored along with
+the rest of `results/` and `figures/`.
+
+Notebooks are marimo, so they're regular Python files:
 
 ```bash
 uv run marimo edit notebooks/explore_vtc.py
@@ -35,32 +47,45 @@ On the cluster add `--headless --port 2718` and forward the port over ssh.
 Dataset paths default to the copy on `/projectnb/nphfnirs`; override with
 `GRADCPT_ROOT` if you're working off a local copy.
 
-## Usage
+## Zones from an HMM
+
+The in/out-of-the-zone measure smooths the VTC with a fixed Gaussian kernel
+and splits at the median. The kernel width sets the switching timescale by hand,
+and the median forces exactly half of every run out of the zone. `zones.py` fits an
+HMM to the VTC instead:
 
 ```python
-from fnirs_glmhmm import behavior, io, model
+from fnirs_glmhmm import io
+from fnirs_glmhmm.zones import compare_to_median_split, fit_zone_hmm
 
-runs = io.load_parcel_ts("sub-01", variant="ols")  # list of (chromophore, parcel, time)
-events = behavior.zone_series(io.load_events("sub-01", run=1))
+vtc = [e["VTC"].to_numpy() for e in io.load_all_events("sub-629")]
+
+fit = fit_zone_hmm(vtc, num_states=2)  # runs share parameters
+fit.states()  # Viterbi path per run, 0 = most in the zone
+fit.out_of_zone_prob()  # graded P(out) per trial; prefer this to the hard label
+fit.expected_dwell  # trials per state, straight off the transition matrix
+
+compare_to_median_split(fit, vtc)
+```
+
+States are always relabelled by ascending VTC, so state 0 means the same thing for
+every subject. `zones.state_sweep` fits a range of state counts and each fit
+exposes `.bic()`.
+
+VTC is a non-negative skewed deviation score, so `transform="log"` (log1p +
+z-score, Gaussian emissions) is the default. `transform="gamma"` fits a GammaHMM on
+the raw values if you'd rather not transform.
+
+## GLM-HMM
+
+```python
+from fnirs_glmhmm import model
 
 fit = model.fit_glm_hmm(
-    emissions=events["out_of_zone"].to_numpy(),
+    emissions=y,  # e.g. zone label per trial
     inputs=design,  # (n_trials, n_features)
     num_states=3,
     kind="logistic",
 )
-states = fit.most_likely_states(events["out_of_zone"].to_numpy(), inputs=design)
+states = fit.most_likely_states(y, inputs=design)
 ```
-
-`model.state_sweep` fits a range of state counts if you want to look at the
-log-likelihood curve before committing to one.
-
-## Notes
-
-- Two preprocessing variants per subject: `ols` (TDDR + 0.5 Hz lowpass before
-  parcellation) and `ar_irls` (no preprocessing before parcellation).
-- The medial wall and scalp parcels are dropped on load; see
-  `config.NON_CORTICAL_PARCELS`.
-- dynamax needs equal-length sessions to fit a batch. `model.stack_sessions`
-  truncates ragged runs and warns; fit separately if that matters.
-- Everything runs on CPU JAX. Add a CUDA jax build if a GPU node is available.
