@@ -1,0 +1,28 @@
+# notes / scratch docs
+data_overview.md
+
+# data and results
+data/
+results/
+figures/
+*.pkl
+*.npz
+*.nc
+*.h5
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+build/
+dist/
+
+# tooling caches
+__marimo__/
+.pytest_cache/
+.ruff_cache/
+
+# cluster job output
+*.qlog
+slurm-*.out
