@@ -18,14 +18,11 @@ def smooth_vtc(vtc: np.ndarray | pd.Series, length: int = 20) -> np.ndarray:
 def signed_vtc(events: pd.DataFrame, rt_col: str = "reaction_time") -> np.ndarray:
     """VTC before the absolute value. Negative is fast, positive is slow.
 
-    The `VTC` column is |z(RT)| under two conventions, both of which have to be matched or
-    the sign lands on the wrong magnitude:
+    Standardisation includes RT = 0 non-responses in the mean and standard
+    deviation. Non-response trials then take the most recent responded trial's
+    deviation; leading non-responses take the first responded trial's value.
 
-    - mean and sd include non-responses at RT = 0, so the centre sits below the
-      responded-trial mean and the sd is wide;
-    - non-response trials copy the previous responded trial forward, not interpolated.
-
-    `abs(signed_vtc(e))` then reproduces `e["VTC"]` to 4e-4 on all 62 runs, its rounding.
+    Compare `abs(signed_vtc(e))` with `e["VTC"]` to check the reconstruction.
     Fit the result with `zones.fit_zone_hmm(..., transform="none")`.
     """
     rt = events[rt_col].to_numpy(dtype=float)
@@ -36,7 +33,7 @@ def signed_vtc(events: pd.DataFrame, rt_col: str = "reaction_time") -> np.ndarra
     z = (rt - rt.mean()) / rt.std(ddof=0)
     idx = np.arange(len(rt))
     src = np.maximum.accumulate(np.where(responded, idx, -1))
-    src[src < 0] = idx[responded][0]  # a run starting on a non-response has nothing behind it
+    src[src < 0] = idx[responded][0]  # use the first response for leading non-responses
     return z[src]
 
 

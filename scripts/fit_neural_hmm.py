@@ -1,21 +1,20 @@
-"""Per-subject GLM-HMMs on the fNIRS network timeseries, with the task as input.
+"""Fit a neural GLM-HMM to each subject's fNIRS network timeseries.
 
-One model per subject: their runs share parameters, nobody else's data enters the
-fit, and K is chosen for each subject by leaving out one of their own runs. States
-are brain states; behaviour never enters the fit and is scored afterwards as
-held-out validation.
+Runs from the same subject share parameters. Leave-one-run-out likelihood selects
+K among multi-state candidates; a one-state regression provides a baseline.
+The final multi-state fit is retained even if that baseline scores better.
 
-Because every subject has their own states, the group claim is a second-level test
-over per-subject effects, not a pooled model. States are aligned across subjects
-only by their DMN baseline: the highest- and lowest-Default_HbO states are what get
-carried up to the group level.
+States are ordered by Default_HbO baseline. Group comparisons use per-subject
+effects for the highest- and lowest-baseline states. The model's task inputs
+include behavioural information, so subsequent behavioural associations are
+not independent held-out validation.
 
 Writes to results/neural/. Run with `uv run python scripts/fit_neural_hmm.py`.
 """
 
 import os
 
-# Has to happen before jax is imported anywhere.
+# Set thread limits before importing JAX.
 NSLOTS = int(os.environ.get("NSLOTS", "8"))
 WORKERS = max(1, min(NSLOTS, 12))
 THREADS = max(1, NSLOTS // WORKERS)
@@ -42,8 +41,8 @@ PREDICTORS = ("dmn_score", "p_dmn_high", "p_dmn_low", "p_out_zone", "out_of_zone
 def sort_states(fit, feature_names: list[str], key: str = SORT_FEATURE) -> np.ndarray:
     """Permutation putting states in ascending order of their baseline in `key`.
 
-    Without it the labels are whatever EM landed on, and nothing is comparable
-    across refits, let alone across subjects.
+    This provides a consistent ordering across refits and subjects without
+    assuming that their full state profiles match.
     """
     biases = np.asarray(fit.params.emissions.biases)
     return np.argsort(biases[:, feature_names.index(key)])
@@ -110,8 +109,8 @@ def state_profiles(fit, order, feature_names, input_names) -> pd.DataFrame:
 def hbo_hbr_signature(profiles: pd.DataFrame) -> pd.DataFrame:
     """Correlate the HbO and HbR halves of each state's baseline across networks.
 
-    Negative is what a neurovascular state looks like. Positive means the state is
-    tracking something systemic and must not be read as cognition.
+    Reports the sign and strength of the cross-network baseline correlation.
+    This summary alone does not identify the physiological source of a state.
     """
     rows = []
     for s, d in profiles.groupby("state"):
@@ -152,8 +151,8 @@ def run_subject(sub: str, args) -> dict | None:
     cv = choose_k(y, x, ks, args.restarts, args.iters, args.kind)
     curve = cv.groupby("k")["test_ll"].mean()
     best_k = int(curve.drop(index=1).idxmax())
-    # What the states buy over no states at all. Negative means this subject has no
-    # state structure that survives cross-validation, and the fit below is descriptive.
+    # Compare the selected multi-state model with the one-state baseline.
+    # A negative gain means the baseline scores better on held-out runs.
     gain = float(curve[best_k] - curve[1])
 
     fit = fit_glm_hmm(
@@ -167,9 +166,8 @@ def run_subject(sub: str, args) -> dict | None:
     dyn = dynamics(fit, order, post)
     hbo_hbr = hbo_hbr_signature(profiles)
 
-    # Expected DMN baseline at each sample: sum_k P(state k) b_k[Default_HbO]. Unlike a
-    # single state's posterior it uses every state and stays on one scale whether the
-    # subject took K = 2 or K = 8, which is what makes it comparable across people.
+    # Weight each state's Default_HbO baseline by its posterior probability.
+    # This produces one continuous score even when subjects have different K.
     dmn = np.asarray(fit.params.emissions.biases)[order][:, feature_names.index(SORT_FEATURE)]
     dmn_score = {r.run: post[i] @ dmn for i, r in enumerate(runs)}
 
@@ -177,7 +175,7 @@ def run_subject(sub: str, args) -> dict | None:
     trials, coup = None, []
     for lag in args.lags:
         frame = coupling.coupling_frame(runs, list(post), lag_s=lag)
-        # The only two states that mean the same thing for everybody.
+        # Select the states with the lowest and highest Default_HbO baselines.
         frame["p_dmn_low"] = frame["p0"]
         frame["p_dmn_high"] = frame[f"p{best_k - 1}"]
         frame["dmn_score"] = [
@@ -229,8 +227,7 @@ def run_subject(sub: str, args) -> dict | None:
 def profile_contrast(profiles: pd.DataFrame) -> pd.DataFrame:
     """DMN-high state minus DMN-low state, per subject, then a group test.
 
-    This is where the hypothesis lives: the high-DMN state should also show the
-    blunted no-go gain.
+    Compare baseline and task-response coefficients between the two states.
     """
     quantities = [c for c in profiles.columns if c == "baseline" or c.startswith("w_")]
     high = profiles[profiles.role == "dmn_high"].set_index(["sub", "feature"])
@@ -252,8 +249,8 @@ def main() -> None:
         "--cov",
         choices=("diag", "full"),
         default="diag",
-        help="full covariance is 105 params per state against ~700 training samples "
-        "with lag-1 r near 0.95; it does not cross-validate",
+        help="emission covariance: diagonal (default) or full; at 14 features, "
+        "these estimate 14 or 105 covariance parameters per state",
     )
     ap.add_argument("--no-nuisance", action="store_true", help="skip global-signal regression")
     ap.add_argument("--subs", nargs="*", default=None)

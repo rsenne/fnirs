@@ -7,12 +7,19 @@ app = marimo.App(width="medium")
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    # Zone HMM
+    # Comparing HMM zones with the median split
 
-    Refits the VTC results in `results/findings.md`, one subject at a time. Calls the same
-    functions as `scripts/fit_zones.py` and `scripts/make_figdata.py`.
+    We want to know how much the zone result depends on smoothing and the median
+    threshold. We fit an HMM to unsmoothed VTC, compare its labels with the usual
+    median split, and check how both relate to omissions.
 
-    Cells run on load, ~20 s. Buttons mark the slow ones.
+    The analysis starts with one subject so we can inspect the fit before running
+    the group comparison. We then vary the emission transform and state count.
+    Finally, we fit signed VTC to ask whether fast and slow deviations have different
+    associations with omissions.
+
+    The initial fits run on load. Buttons start the longer comparisons; their timing
+    estimates depend on your machine.
     """)
     return
 
@@ -49,24 +56,27 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Controls
+    ## 1. Choose the fit
 
-    `zones.prepare_vtc` is the only thing that touches VTC before EM.
+    We start with two states to keep the comparison close to the binary median split.
+    All runs from the selected subject contribute to the fit.
 
-    | transform | does | emissions |
+    The default log transform reduces the influence of VTC's right tail. We also
+    try standardisation alone and Gamma emissions to check whether the result depends
+    on that treatment of the distribution.
+
+    | Transform | Preparation within each run | Emissions |
     |---|---|---|
-    | `log` | log1p, then z-score per run | Gaussian |
-    | `zscore` | z-score per run | Gaussian |
-    | `gamma` | nothing | Gamma |
+    | `log` | log1p, then z-score | Gaussian |
+    | `zscore` | z-score | Gaussian |
+    | `gamma` | Original scale, with a small offset if zeros are present | Gamma |
 
-    VTC is positive with a long right tail. Left raw, a Gaussian spends a state on the tail
-    instead of on behaviour. Hence `log`.
+    We order states by emission mean and call the highest-VTC state "out of the zone."
+    For fits with more than two states, the binary comparison combines all other states.
 
-    None of it is normal. Median skew across runs: RT +0.50, VTC +1.38, log1p(VTC) +0.73. The
-    absolute value creates the skew, the log halves it. A Gaussian HMM needs the emissions
-    normal within state, not the marginal, and the mixture absorbs the rest.
-
-    States sort by emission mean either way, so state 0 is always the in-the-zone one.
+    The restarts control repeats the fit from different initialisations. We keep the
+    fit with the highest final log likelihood to reduce sensitivity to the starting
+    point.
     """)
     return
 
@@ -93,12 +103,19 @@ def _(io, sub):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Why raw VTC
+    ## 2. Check the effect of smoothing
 
-    The median split smooths first, 20-trial Gaussian kernel. Its long in/out blocks come from
-    that kernel: raw VTC is lag-1 r ~ 0.5, in the noise by lag 10.
+    The median split uses a 20-trial Gaussian filter, applied forwards and backwards.
+    Before comparing labels, we check how much persistence this adds to the series.
 
-    Fit the smoothed series and the HMM fits the filter.
+    The autocorrelation curves below are averaged across the selected subject's runs.
+    The legend reports integrated autocorrelation time, summed up to the first
+    non-positive lag. The shaded band is a rough reference of +/- 2 / sqrt(N), using
+    the average run length.
+
+    We use unsmoothed VTC for the main HMM so the filter does not set the persistence
+    the model sees. Later, we also fit smoothed VTC to assess how much of the difference
+    between methods comes from this choice.
     """)
     return
 
@@ -138,10 +155,17 @@ def _(acf, iat, np, plotting, plt, smooth_vtc, vtc_runs):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## The fit
+    ## 3. Fit all runs from this subject
 
-    Runs share parameters. Concatenated, not batched, since dynamax has no masking and runs
-    differ in length. Costs one false transition per run boundary.
+    Sharing parameters across runs gives us one set of states for each subject.
+    The implementation concatenates runs during fitting to accommodate their different
+    lengths. This adds an artificial transition at each run boundary; decoding is
+    performed separately for each run.
+
+    Check the state means alongside occupancy and dwell. A state that captures only
+    a few extreme trials gives a different segmentation from one occupied throughout
+    much of the run. Dwell comes from the fitted self-transition probability,
+    `1 / (1 - p_stay)`; occupancy comes from the Viterbi path.
     """)
     return
 
@@ -174,11 +198,16 @@ def _(compare_to_median_split, fit, mo, np, vtc_runs):
     cmp = compare_to_median_split(fit, vtc_runs)
     mo.md(
         f"""
-        Against the median split, collapsing the HMM to highest-VTC state vs the rest:
-        agreement **{cmp["agreement"]:.3f}**, fraction out of the zone
-        **{cmp["frac_out_hmm"]:.3f}** vs **{cmp["frac_out_median_split"]:.3f}**, switches per run
-        **{np.mean(cmp["switches_hmm"]):.0f}** vs **{np.mean(cmp["switches_median_split"]):.0f}**.
-        The split is pinned at 0.5 by construction; the HMM is not.
+        Treating the highest-VTC state as "out," the HMM agrees with the median
+        split on **{cmp["agreement"]:.1%}** of trials, averaged across runs.
+
+        The mean fraction out of the zone is **{cmp["frac_out_hmm"]:.3f}** for the
+        HMM and **{cmp["frac_out_median_split"]:.3f}** for the median split.
+        They average **{np.mean(cmp["switches_hmm"]):.0f}** and
+        **{np.mean(cmp["switches_median_split"]):.0f}** switches per run, respectively.
+
+        The median split labels half of each run out of the zone; ties
+        at the median are labelled in. The HMM's fraction depends on the fit.
         """
     )
     return
@@ -187,10 +216,16 @@ def _(compare_to_median_split, fit, mo, np, vtc_runs):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## One run
+    ## 4. Inspect where the labels differ
 
-    VTC and its smoothed version, the HMM's `P(out)`, the split's hard label. Ticks are
-    omissions.
+    The top panel overlays original and smoothed VTC, with red ticks for omissions.
+    The next two panels show the HMM's `P(out)` and the median split's binary label.
+
+    Look at both the location and duration of out-of-zone periods. Differences in
+    omission rates may reflect how quickly the labels track local changes in VTC.
+
+    The HMM probabilities use the full run, including later observations. This plot
+    describes the recorded sequence; it is not a prospective prediction.
     """)
     return
 
@@ -232,12 +267,23 @@ def _(events, fit, np, plotting, plt, run, smooth_vtc, vtc_runs, zone_labels):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Scoring
+    ## 5. Compare omission rates
 
-    Omissions, not commission errors: VTC is unrelated to commission errors here (0.498 vs
-    0.499, p = 0.89), so every measure scores null on them.
+    We use omissions to assess whether the segmentations identify periods with
+    different error rates. The commission-error comparison is available separately
+    in `scripts/fit_zones.py`.
 
-    Lift = `P(omit | out) - P(omit | in)`, go trials, runs pooled.
+    Within each subject, we pool runs and calculate:
+
+    `omission lift = P(omission | out, city) - P(omission | in, city)`
+
+    Pooling gives us more observations for each conditional rate. For the HMM, "out"
+    means the highest-VTC state in the Viterbi path. A lift of 0.02 is a two-percentage-
+    point difference in omission rates.
+
+    This is a same-run association. VTC on non-response trials is filled from responded
+    trials, so the score also depends on that construction. We return to this when
+    interpreting the signed-VTC fit.
     """)
     return
 
@@ -283,9 +329,10 @@ def _(
     vtc_runs,
 ):
     mo.md(f"""
-    This subject: HMM (`{transform.value}`) **{omission_lift(events, hmm_mask(fit)):+.4f}**,
-    median split **{omission_lift(events, split_mask(vtc_runs)):+.4f}**. One subject proves
-    nothing; the group cell below is the comparison.
+    For this subject, omission lift is
+    **{omission_lift(events, hmm_mask(fit)):+.4f}** for the HMM (`{transform.value}`)
+    and **{omission_lift(events, split_mask(vtc_runs)):+.4f}** for the median split.
+    The group comparison below checks how these differences vary across subjects.
     """)
     return
 
@@ -293,10 +340,17 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## What the transform changes
+    ## 6. Check sensitivity to the transform
 
-    All three at k = 2. `gamma` means are on the raw VTC scale, so that row's means do not
-    compare to the others.
+    Refit the selected subject with all three transforms, holding the state count at
+    two and using the selected number of restarts.
+
+    Compare omission lift together with occupancy, dwell, and switching. Similar
+    results across transforms would suggest that the segmentation is not especially
+    sensitive to our treatment of the VTC distribution.
+
+    Emission means are on different scales across rows, so compare their ordering
+    within a fit rather than their numerical values between transforms.
     """)
     return
 
@@ -346,11 +400,17 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## State count
+    ## 7. Check what extra states capture
 
-    BIC picks 4 over 2 in 16/21 subjects. Ignore it: omission forecast AUC is flat across the
-    sweep (k=2 0.797, k=5 0.777, k=5 significantly worse). The extra states fit the skew, not
-    extra regimes. Published numbers use k = 2.
+    The sweep fits two through five states with the selected transform. BIC asks
+    whether the improvement in likelihood offsets the extra parameters.
+
+    Inspect the state means and minimum dwell alongside BIC. Extra states may describe
+    more detail in the VTC distribution without identifying additional attentional
+    conditions. A lower BIC does not resolve that interpretation by itself.
+
+    We keep two states for the group comparison so every subject contributes the
+    same binary contrast. The sweep does not change that setting.
     """)
     return
 
@@ -387,24 +447,28 @@ def _(fit_zone_hmm, mo, np, pd, restarts, run_sweep, transform, vtc_runs):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## All subjects
+    ## 8. Compare subjects
 
-    Per subject: HMM on raw VTC (transform above), HMM on smoothed VTC, median split. The
-    smoothed fit uses `zscore`, matching `make_figdata.py` -- a 20-trial average is already
-    near-Gaussian, skew 1.2 to 0.8.
+    For each subject, we calculate omission lift for:
 
-    Published, with `log`:
+    1. An HMM on unsmoothed VTC with the selected transform.
+    2. An HMM on smoothed VTC with `zscore`.
+    3. The median split of smoothed VTC.
 
-    | measure | mean lift | p | subjects + |
-    |---|---|---|---|
-    | HMM, raw | +0.0233 | 0.0023 | 15/21 |
-    | HMM, smoothed | +0.0107 | 0.0038 | 14/21 |
-    | median split | +0.0101 | 0.0038 | 15/21 |
+    Both HMMs use two states and the selected number of restarts. The smoothed fit
+    matches `scripts/make_figdata.py`. It provides a comparison with the median split
+    on the same input series. With the default settings, the two HMMs differ in both
+    smoothing and transform, so their contrast does not isolate smoothing alone.
 
-    Paired, raw HMM over split: +0.0132 (p = 0.0019). Part of that is timing, not better
-    states: omissions sit in locally high VTC and the HMM switches faster.
+    We calculate effects within subject before summarising across subjects. The final
+    row tests the paired difference in lift between the unsmoothed HMM and median split.
+    The Wilcoxon p-values are unadjusted for the comparisons shown.
 
-    Two fits x 21 subjects, serial: ~10 min. `scripts/make_figdata.py` runs it on 12 cores.
+    Read lift alongside occupancy and switching: a larger contrast may reflect a
+    smaller or more precisely timed set of out-of-zone trials.
+
+    This cell runs subjects serially and may take about ten minutes. The batch script
+    `scripts/make_figdata.py` runs the default comparison with 12 workers.
     """)
     return
 
@@ -502,11 +566,13 @@ def _(group, pd, transform, wilcoxon):
 @app.cell
 def _(group, mo, np, transform):
     mo.md(f"""
-    Medians: dwell **{np.median(group.dwell_in):.1f}** trials in the zone,
-    **{np.median(group.dwell_out):.1f}** out, **{np.median(group.switches_hmm):.0f}** switches
-    per run against the split's **{np.median(group.switches_split):.0f}**. Matches VTC's
-    autocorrelation time, so the split's long blocks are the kernel. Transform:
-    `{transform.value}`.
+    Across subjects, the median expected HMM dwell is
+    **{np.median(group.dwell_in):.1f}** trials in the zone and
+    **{np.median(group.dwell_out):.1f}** out of the zone, using `{transform.value}`.
+    The median of subjects' mean switch counts is
+    **{np.median(group.switches_hmm):.0f}** per run for the HMM and
+    **{np.median(group.switches_split):.0f}** for the median split.
+    Compare these with the autocorrelation plot to assess the methods' timescales.
     """)
     return
 
@@ -514,22 +580,22 @@ def _(group, mo, np, transform):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## Dropping the absolute value
+    ## 9. Separate fast and slow deviations
 
-    VTC is |z(RT)|. A trial 1.5 sd fast and one 1.5 sd slow are the same number, so they land
-    in the same state. Out of the zone means variable, not slow.
+    The unsigned fit combines fast and slow deviations. We now keep the sign to ask
+    whether they have different associations with omissions.
 
-    `behavior.signed_vtc` puts the sign back. `abs()` of it matches the `VTC` column to 4e-4
-    on all 62 runs, the column's own rounding. Getting that match pinned two upstream
-    conventions:
+    `behavior.signed_vtc` reconstructs the series using the dataset's conventions:
+    RT = 0 non-responses enter the mean and standard deviation, then take the most
+    recent responded trial's deviation. Leading non-responses use the first response.
+    The check below compares the reconstructed absolute values with the supplied VTC.
 
-    - mean and sd include non-responses at RT = 0, so the centre sits below the
-      responded-trial mean and the sd is wide;
-    - non-response trials copy the previous responded trial forward. No interpolation. An
-      omission inherits the deviation of the trial before it.
+    We use `transform="none"` to preserve this scale and its zero point. The default
+    three-state fit allows low, intermediate, and high signed deviations to separate.
+    Their means determine the interpretation; the model does not impose fast,
+    on-pace, and slow categories.
 
-    Fit it with `transform="none"`: already standardised, and re-centring would move the
-    fast/slow boundary off zero.
+    The table reports omission rates by state. The plot uses the run selected above.
     """)
     return
 
@@ -543,8 +609,9 @@ def _(events, mo, np, signed_vtc):
     )
     _fast = np.mean(np.concatenate(signed_runs) < 0)
     mo.md(f"""
-    Largest `|abs(signed) - VTC|` here: **{_err:.1e}**. **{_fast:.1%}** of trials are on the
-    fast side.
+    The largest absolute difference between reconstructed and supplied VTC is
+    **{_err:.1e}** for this subject. Signed VTC is below zero on **{_fast:.1%}** of
+    trials, including filled values on trials without a response.
     """)
     return (signed_runs,)
 
@@ -608,7 +675,7 @@ def _(fit_signed, np, plotting, plt, run, signed_runs):
         xlabel="trial",
         ylabel="signed VTC (sd)",
         ylim=(-_lim, _lim),
-        title="below the line is fast, above is slow; shading is the state",
+        title="Signed reaction-time deviations and fitted states",
     )
     _fig
     return
@@ -617,10 +684,15 @@ def _(fit_signed, np, plotting, plt, run, signed_runs):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ### Which tail
+    ### Compare each tail with the remaining states
 
-    Slowest state minus the rest, fastest state minus the rest, folded k = 2 fit for
-    reference.
+    For each subject, compare the highest-mean signed state with all remaining states,
+    then repeat for the lowest-mean state. We also refit unsigned VTC with two states
+    as a reference.
+
+    The signed fits use the state count selected above; the unsigned fits use the
+    transform selected at the start. All use the selected number of restarts.
+    This checks whether combining the two tails obscures different omission rates.
     """)
     return
 
@@ -707,22 +779,20 @@ def _(pd, signed_group, wilcoxon):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    k = 3 gives fast (-0.96 sd, occupancy 0.31, dwell 5.3), on pace (+0.11, 0.50, 5.7) and
-    slow (+1.31, 0.16, 3.3).
+    ## 10. Interpret the signed comparison
 
-    | contrast | mean lift | p | subjects + |
-    |---|---|---|---|
-    | slowest - rest | +0.0390 | 0.0005 | 15/21 |
-    | fastest - rest | -0.0060 | 0.0052 | 1/21 |
-    | folded, abs(VTC) | +0.0233 | 0.0023 | 15/21 |
+    Check whether the slowest and fastest states have similar omission contrasts.
+    If they differ, a single high-VTC category combines periods with different
+    behavioural associations.
 
-    The fast tail is not a lapse state: it omits no more than on pace (+0.003, p = 0.80). The
-    slow tail does (+0.040, p = 0.0006). Folding them costs +0.0157 of lift (paired,
-    p = 0.013, 12/21).
+    Compare occupancy as well as lift. A smaller state can select a narrower set of
+    high-error periods, so a larger lift alone does not establish that the signed
+    model is a better description.
 
-    Two caveats. The slow state holds 0.16 of trials against ~0.35 folded, so some of the gain
-    is selectivity. And the forward-fill makes a slow drift into an omission partly
-    definitional; the lag-exclusion controls in `findings.md` ran on the folded measure only.
+    An omission inherits a responded trial's signed deviation. An association with
+    the slowest state therefore describes the surrounding response pattern, not the
+    reaction time of the missed response. A predictive analysis would need to restrict
+    the information available before each trial.
     """)
     return
 

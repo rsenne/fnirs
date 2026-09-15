@@ -1,16 +1,15 @@
-"""Fit zone HMMs for every subject and check them against the median split.
+"""Fit zone HMMs and compare their labels with the smoothed median split.
 
-Scores both measures against commission errors, which VTC has no relationship to in
-this dataset, so that comparison comes out null for everything. The BIC sweep and
-the descriptive columns are what still get used; they feed results/figdata/bic.csv.
-Omission scoring lives in scripts/make_figdata.py.
+Writes per-subject zone summaries, commission-error rates, and a BIC sweep to
+results/zone_hmm_vs_split.csv. The omission-rate comparison is in
+scripts/make_figdata.py and notebooks/zone_hmm_reproduction.py.
 
-Run with `uv run python scripts/fit_zones.py`. One process per subject.
+Run with `uv run python scripts/fit_zones.py`. Subjects run in worker processes.
 """
 
 import os
 
-# Has to happen before jax is imported anywhere.
+# Set thread limits before importing JAX.
 NSLOTS = int(os.environ.get("NSLOTS", "8"))
 WORKERS = max(1, min(NSLOTS, 12))
 THREADS = max(1, NSLOTS // WORKERS)

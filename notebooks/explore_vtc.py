@@ -14,6 +14,24 @@ def _():
     return behavior, io, mo, np, plt
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    # Explore the VTC median split
+
+    Choose a subject to inspect their first run. VTC measures the absolute
+    standardised reaction-time deviation; higher values indicate larger deviations.
+
+    The table adds smoothed VTC and an `out_of_zone` label to the event data. In the
+    plot, values above the smoothed series' median are labelled out of the zone.
+    Compare the original and smoothed curves to see how the filter changes the
+    duration of high- and low-VTC periods.
+
+    For the HMM comparison and group analysis, open `zone_hmm_reproduction.py`.
+    """)
+    return
+
+
 @app.cell
 def _(io, mo):
     subs = io.subject_ids()

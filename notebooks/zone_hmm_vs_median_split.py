@@ -26,6 +26,25 @@ def _():
     )
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    # Compare HMM zones with the median split
+
+    Choose a subject and a state count to fit an HMM to all of their VTC runs.
+    VTC is the absolute standardised reaction-time deviation. The default fit uses
+    log1p followed by standardisation within each run.
+
+    States are ordered by their emission means. The binary comparison calls the
+    highest-VTC state "out of the zone" and combines the others as "in." The median
+    split labels trials above the median of smoothed VTC as out.
+
+    This is a compact exploratory notebook. For a guided analysis with omission-rate
+    comparisons, use `zone_hmm_reproduction.py`. All fits here run automatically.
+    """)
+    return
+
+
 @app.cell
 def _(io, mo):
     subs = io.subject_ids()
@@ -59,6 +78,22 @@ def _(compare_to_median_split, fit, np, vtc_runs):
     return
 
 
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Read the fit and compare the first run
+
+    The output above lists emission means, expected dwell in trials, occupancy, and
+    agreement with the median split. Occupancy is the fraction of trials assigned to
+    each state; dwell comes from the fitted transition probabilities.
+
+    Below, the first panel overlays original and smoothed VTC. The next two panels
+    show the HMM's probability of the highest-VTC state and the median split's binary
+    label. HMM probabilities use the full run, including later observations.
+    """)
+    return
+
+
 @app.cell
 def _(fit, np, plt, smooth_vtc, vtc_runs, zone_labels):
     # Run 1: what each method calls out of the zone.
@@ -82,6 +117,19 @@ def _(fit, np, plt, smooth_vtc, vtc_runs, zone_labels):
     axes[2].set_ylim(0, 1)
     axes[2].set_xlabel("trial")
     fig
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## Compare state counts
+
+    This cell fits two, three, and four states. Lower BIC indicates a better tradeoff
+    between likelihood and parameter count under this criterion. Inspect the emission
+    means too: additional states may describe details of the VTC distribution without
+    necessarily identifying distinct attentional conditions.
+    """)
     return
 
 

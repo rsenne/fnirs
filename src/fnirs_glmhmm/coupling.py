@@ -1,14 +1,11 @@
-"""Trial-level coupling between a subject's neural HMM states and their behaviour.
+"""Associations between a subject's neural HMM states and their behaviour.
 
-The GLM-HMM is fit per subject, so everything here is within-subject first: one
-slope per subject per outcome, and the group claim is a test across those slopes.
-Nothing is pooled at the trial level, which also means no state ever has to mean
-the same thing for two different people.
+Effects are calculated within subject, then summarised across subjects. Trials
+are matched to the neural sample `lag_s` seconds after onset to allow for the
+haemodynamic delay.
 
-Behaviour never enters the fit, so every association scored here is out of sample.
-Trials are matched to the neural sample `lag_s` seconds after onset, which is where
-that trial's haemodynamic response lands; the lag is a free parameter and worth
-profiling rather than guessing once.
+The neural fit uses behaviour-derived task inputs. These associations describe
+the recorded data and should not be treated as held-out behavioural validation.
 """
 
 import numpy as np
@@ -64,13 +61,15 @@ def coupling_frame(runs, posteriors, lag_s: float = 4.0) -> pd.DataFrame:
 
 def subset(df: pd.DataFrame, outcome: str) -> pd.DataFrame:
     """Trials the outcome is defined on: no-go for commissions, go for omissions,
-    hits for RT and VTC. Hits only for VTC keeps interpolated no-press values out."""
+    hits for RT and VTC. Using hits for VTC excludes filled values from non-response trials."""
     return df[df[OUTCOMES[outcome]]].dropna(subset=[outcome])
 
 
 def _slope(x: np.ndarray, y: np.ndarray) -> float:
-    """OLS slope. On a binary outcome this is a linear probability model, which
-    holds up better than logistic when a subject has only a handful of errors."""
+    """OLS slope; binary outcomes use a linear probability model.
+
+    Returns NaN for fewer than ten trials or a nearly constant predictor.
+    """
     if len(x) < 10 or x.std() < 1e-9:
         return np.nan
     return float(np.polyfit(x, y, 1)[0])
@@ -79,8 +78,7 @@ def _slope(x: np.ndarray, y: np.ndarray) -> float:
 def _contrast(x: np.ndarray, y: np.ndarray) -> float:
     """Outcome in the upper half of the predictor minus the lower half.
 
-    Same shape as the in/out-of-the-zone contrast the VTC literature reports, and
-    it does not care whether the relationship is linear.
+    Summarises the difference between two groups without fitting a linear slope.
     """
     hi = x > np.median(x)
     if hi.sum() < 5 or (~hi).sum() < 5:
@@ -115,10 +113,9 @@ def subject_coupling(df: pd.DataFrame, predictors, outcomes=tuple(OUTCOMES)) -> 
 def group_test(
     rows: pd.DataFrame, by=("outcome", "predictor"), value: str = "slope"
 ) -> pd.DataFrame:
-    """Second level: are the per-subject effects consistently signed?
+    """Summarise per-subject effects and apply a Wilcoxon signed-rank test.
 
-    Wilcoxon signed-rank over subjects, which is what the VTC analyses in
-    findings.md use, so the two are directly comparable.
+    Reports an unadjusted p-value when at least six subject effects are available.
     """
     out = []
     for keys, g in rows.groupby(list(by)):

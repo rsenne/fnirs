@@ -1,6 +1,8 @@
-"""Precompute everything the figures need, so plotting scripts never refit models.
+"""Fit the zone comparisons and save tables for plotting.
 
-Writes tidy CSVs to results/figdata/. Run before scripts/figures/*.py.
+Writes omission rates, autocorrelations, state dynamics, and example traces to
+results/figdata/. If results/zone_hmm_vs_split.csv exists, also exports its BIC
+columns. Run with `uv run python scripts/make_figdata.py`.
 """
 
 import os
@@ -59,7 +61,7 @@ def per_subject(sub):
     # Autocorrelation, one curve per run.
     acfs = [(acf(v, MAXLAG), acf(smooth_vtc(v), MAXLAG)) for v in vtc]
 
-    # Peri-error VTC, responded trials only so no interpolated values enter.
+    # VTC around errors, using responded trials to exclude filled values.
     peri = []
     for e in ev:
         v, rc = e.VTC.to_numpy(), e.response_code.to_numpy()

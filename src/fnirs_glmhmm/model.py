@@ -24,11 +24,9 @@ VARIANCE_FLOOR = 1e-4
 class _DiagonalEmissions(LinearRegressionHMMEmissions):
     """Linear regression emissions with the covariance constrained to diagonal.
 
-    The ML diagonal covariance is just the diagonal of the unconstrained one (the
-    weights do not depend on Sigma), so constraining it is a one-line change to the
-    M-step. It costs D params per state instead of D(D+1)/2, which is the difference
-    between a fittable and an unfittable model when a single subject supplies a few
-    hundred effectively-independent samples.
+    The M-step retains the fitted variances, floors them at VARIANCE_FLOOR,
+    and zeros the off-diagonal entries. This uses D covariance parameters per
+    state instead of D(D+1)/2.
     """
 
     def m_step(self, params, props, batch_stats, m_step_state):
@@ -134,7 +132,7 @@ def fit_glm_hmm(
     `emissions` and `inputs` are either (T, D) for one session or (N, T, D) for a
     batch of equal-length sessions. `init_method="kmeans"` seeds the emission
     means from a clustering of the data, which matters for continuous emissions
-    where a prior draw can start miles from the data.
+    where a prior draw can start far from the observed values.
     """
     emissions = jnp.asarray(emissions)
     inputs = None if inputs is None else jnp.asarray(inputs)
@@ -167,8 +165,8 @@ def no_state_log_prob(
     """Held-out log likelihood of the one-state baseline: a plain linear regression.
 
     dynamax cannot represent a one-state HMM (its Dirichlet transition prior needs
-    at least two categories), and this is the number every K > 1 model has to beat
-    before any of its states mean anything.
+    at least two categories). This regression provides a baseline for assessing
+    whether additional states improve held-out likelihood.
     """
     flat = lambda a: np.asarray(a).reshape(-1, np.asarray(a).shape[-1])  # noqa: E731
     ytr, xtr, yte, xte = flat(y_train), flat(x_train), flat(y_test), flat(x_test)

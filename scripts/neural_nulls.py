@@ -1,31 +1,26 @@
-"""Surrogate and circular-shift nulls for the per-subject neural GLM-HMM.
+"""Compare neural GLM-HMM results with surrogate data and shifted state sequences.
 
-Haemodynamic features are autocorrelated at r ~ 0.95 lag-1 even at 1 Hz, and an HMM
-will happily carve states out of pure autocorrelated noise. Three nulls say whether
-the states in scripts/fit_neural_hmm.py are more than that:
+Smooth, autocorrelated signals can produce apparent HMM states. These comparisons
+ask which fitted patterns also occur under three null procedures:
 
-- **AR surrogate**: keep each subject's task response and each feature's own
-  autocorrelation and cross-feature innovation covariance, destroy any state
-  structure, then rerun the whole pipeline. Both the cross-validated likelihood
-  gain over a one-state model and the behavioural coupling get a null distribution.
-  The draws are bandpassed like the data, because an AR(p) fit cannot represent the
-  0.01 Hz highpass and an unfiltered draw is easier to find states in than the real
-  thing.
-- **Phase randomisation**: the same idea with nothing left to misspecify. Each
-  feature keeps its exact spectrum and every pair its exact cross-spectrum, so a
-  state that survives this one is not linear second-order structure. This is the
-  null to quote.
-- **Circular shift**: keep the real fitted states, slide them against behaviour.
-  Cheap, so it gets many more draws, and it isolates the behavioural claim from the
-  question of whether the states themselves are real.
+- AR surrogates simulate residuals with per-feature autoregressive models and
+  shared innovation covariance, then add the fitted task response. Simulations
+  are bandpassed to match the preprocessing of the real features.
+- Phase-randomised surrogates preserve the residuals' power spectra and
+  cross-spectra while changing their temporal arrangement.
+- Circular shifts move each run's fitted state probabilities relative to its
+  trials, testing their alignment with behaviour.
 
-Reads the fits written by scripts/fit_neural_hmm.py. Run with
-`uv run python scripts/neural_nulls.py`.
+Surrogate fits and cross-validation use the saved state count for each subject;
+they do not repeat the search over K. Circular shifts reuse the real fits.
+
+Reads results from scripts/fit_neural_hmm.py and writes to results/neural/.
+Run with `uv run python scripts/neural_nulls.py`.
 """
 
 import os
 
-# Has to happen before jax is imported anywhere.
+# Set thread limits before importing JAX.
 NSLOTS = int(os.environ.get("NSLOTS", "8"))
 WORKERS = max(1, min(NSLOTS, 12))
 THREADS = max(1, NSLOTS // WORKERS)
@@ -57,8 +52,7 @@ NULL_PREDICTORS = ("p_dmn_high", "p_dmn_low")
 def fit_ar(x: np.ndarray, max_p: int = 5) -> tuple[np.ndarray, float]:
     """Least-squares AR fit to one feature, order picked by AIC.
 
-    Returns the coefficients and the innovation variance. Expect p of 1-3 on data
-    this smooth; anything longer is usually the filter talking.
+    Returns the selected coefficients and the innovation variance.
     """
     best = None
     for p in range(1, max_p + 1):
@@ -76,9 +70,8 @@ def fit_ar(x: np.ndarray, max_p: int = 5) -> tuple[np.ndarray, float]:
 def ar_model(resid_runs: list[np.ndarray], max_p: int = 5):
     """Per-feature AR coefficients plus the cross-feature innovation covariance.
 
-    Per-feature AR keeps each network's own smoothness; the shared innovation
-    covariance keeps the instantaneous coupling between networks, which is most of
-    what makes the features look like they move together.
+    Each feature gets its own temporal model. The innovation covariance captures
+    correlations between the models' residuals.
     """
     stacked = np.concatenate(resid_runs)
     coefs = [fit_ar(stacked[:, d], max_p)[0] for d in range(stacked.shape[1])]
@@ -103,16 +96,11 @@ def simulate_ar(coefs, cov, n_samples: int, rng, burn: int = 300) -> np.ndarray:
 
 
 def phase_surrogate(resid: np.ndarray, rng) -> np.ndarray:
-    """Phase-randomised surrogate of one run's residuals.
+    """Randomise residual phases while preserving spectra within a run.
 
-    One random phase per frequency, applied to every feature at once, so each
-    feature keeps its exact power spectrum (hence its exact autocorrelation) and
-    every pair keeps its exact cross-spectrum. Nothing survives but the linear
-    second-order structure, which is the point.
-
-    This is the stricter of the two surrogates. An AR(p) fit cannot represent the
-    0.01 Hz highpass in these features and leaks low-frequency power that an HMM is
-    only too happy to call a state; phase randomisation has no such freedom.
+    Applying the same random phase to every feature at each frequency preserves
+    the power spectra and pairwise cross-spectra. This avoids the spectral
+    approximation made by the finite-order AR model.
     """
     n = len(resid)
     spectrum = np.fft.rfft(resid, axis=0)
@@ -124,7 +112,7 @@ def phase_surrogate(resid: np.ndarray, rng) -> np.ndarray:
 
 
 def surrogate_runs(runs, rng, kind: str = "ar", max_p: int = 5, pad: int = 300):
-    """Task response preserved, second-order structure matched, states destroyed."""
+    """Add surrogate residuals to the fitted task response, then standardise."""
     y = np.stack([r.y for r in runs])
     x = np.stack([r.x for r in runs])
     design = [np.column_stack([np.ones(len(r.x)), r.x]) for r in runs]
@@ -152,7 +140,7 @@ def surrogate_runs(runs, rng, kind: str = "ar", max_p: int = 5, pad: int = 300):
 
 
 def cv_gain(y, x, k, restarts, iters) -> float:
-    """Held-out nats per sample that k states buy over a single linear regression."""
+    """Held-out log-likelihood gain over one-state regression, in nats per sample."""
     gains = []
     for fold in range(len(y)):
         test = np.zeros(len(y), dtype=bool)
@@ -179,10 +167,8 @@ def baseline_contrast(biases: np.ndarray, feature_names) -> dict:
     """DMN-high state minus DMN-low state, per feature.
 
     States are sorted on Default_HbO, so that feature's contrast is positive by
-    construction and only its size is informative. The other networks are the real
-    test: an AR surrogate inherits the cross-feature covariance, so if the
-    DMN-versus-DorsAttn opposition is only covariance structure, the null will
-    reproduce it.
+    construction. Contrasts in other networks can be compared with surrogates
+    to assess how much of the pattern is explained by their covariance.
     """
     diff = biases[-1] - biases[0]
     return {f"contrast:{n}": float(v) for n, v in zip(feature_names, diff, strict=True)}
@@ -228,7 +214,7 @@ def run_subject(sub: str, args) -> pd.DataFrame | None:
                  **coupling_slopes(runs, shift_posteriors(real_post, rng)))
         )  # fmt: skip
 
-    # Surrogates: rerun the whole pipeline on data that has no states in it.
+    # Refit and cross-validate surrogate data at the real fit's selected K.
     for surrogate in args.surrogates:
         for draw in range(args.ar_draws):
             sim, xs = surrogate_runs(runs, rng, kind=surrogate)
@@ -263,11 +249,9 @@ ONE_SIDED = ("cv_gain",)  # a likelihood gain only counts if it is larger, not m
 def summarize(nulls: pd.DataFrame, stats: list[str], n_resamples: int = 2000, seed: int = 0):
     """Where the real statistic sits in each null, per subject and for the group.
 
-    The group row is the one that matters: a null "study" is one draw taken from
-    every subject, so it asks whether the whole result could have come out of
-    matched noise. Draws within a subject are exchangeable, so the group null is
-    built by resampling combinations rather than by pairing draw indices, which
-    would cap the resolution at 1/n_draws.
+    Each group resample takes one null draw per subject and averages them.
+    Resampling combinations avoids requiring draw indices to match across subjects.
+    The resulting comparison still depends on the available draws per subject.
     """
     rng = np.random.default_rng(seed)
     out = []
@@ -292,7 +276,7 @@ def summarize(nulls: pd.DataFrame, stats: list[str], n_resamples: int = 2000, se
             if not columns:
                 continue
 
-            # One draw per subject, many times over: each resample is a fake study.
+            # Draw one statistic per subject to form each group null mean.
             picks = np.stack([rng.choice(c, size=n_resamples) for c in columns])
             group_null = picks.mean(axis=0)
             real_mean = float(np.mean(real_vals))

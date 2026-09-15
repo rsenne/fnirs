@@ -1,6 +1,8 @@
 # fnirs-glmhmm
 
-GLM-HMM analysis of the gradCPT fNIRS dataset (`gradCPT_NN24`, n = 21).
+GLM-HMM analysis of the gradCPT fNIRS dataset (`gradCPT_NN24`, 21 subjects).
+The repository includes an HMM analysis of reaction-time variability and a
+GLM-HMM analysis of network-level fNIRS activity.
 
 ## Setup
 
@@ -8,112 +10,152 @@ GLM-HMM analysis of the gradCPT fNIRS dataset (`gradCPT_NN24`, n = 21).
 uv sync
 ```
 
-That creates `.venv` with everything pinned in `uv.lock`. Run things with
-`uv run python ...` or `uv run pytest`, or activate the venv directly.
+This installs the dependencies pinned in `uv.lock` into `.venv`.
+Use `uv run` to run scripts, notebooks, or tests in that environment.
 
-## Layout
+The dataset is stored separately. Paths default to
+`/projectnb/nphfnirs/s/datasets/gradCPT_NN24`; set `GRADCPT_ROOT` to the dataset
+directory if you have a local copy. Subject discovery checks for the parcel
+timeseries files, so the notebook needs the expected derivatives directory as
+well as the event tables.
 
-```
-src/fnirs_glmhmm/
-  config.py    dataset paths and constants
-  io.py        parcel timeseries, event tables, eyetracking
-  behavior.py  VTC smoothing and the classic median-split zone labels
-  zones.py     HMM-derived zones, the replacement for the median split
-  neural.py    network features, task design and nuisance regression for the fNIRS fit
-  coupling.py  per-trial coupling between neural states and behaviour
-  model.py     dynamax GLM-HMM wrappers
-  plotting.py  shared figure style and palette
-scripts/       batch jobs that write to results/
-  fit_zones.py       per-subject zone HMMs and the BIC sweep
-  fit_neural_hmm.py  per-subject neural GLM-HMMs, K by cross-validation
-  neural_nulls.py    AR surrogate and circular-shift nulls for those fits
-  make_figdata.py    tidy CSVs for the figures, run before scripts/figures/
-  figures/           one script per figure, reads results/figdata/ or results/neural/
-notebooks/     marimo notebooks (plain .py, diffable)
-tests/
-```
-
-`scripts/fit_zones.py` fits every subject and scores the HMM zones against the
-median split on commission errors. One process per subject, sized off `NSLOTS`.
-
-Results and analysis notes live in `results/findings.md`, gitignored along with
-the rest of `results/` and `figures/`.
-
-Notebooks are marimo, so they're regular Python files:
+## Start with the notebook
 
 ```bash
 uv run marimo edit notebooks/zone_hmm_reproduction.py
-uv run marimo run notebooks/zone_hmm_reproduction.py   # read-only app view
+uv run marimo run notebooks/zone_hmm_reproduction.py
 ```
 
-Start with `zone_hmm_reproduction.py`. It refits the whole VTC result, with the transform
-and the signed VTC as controls. The other two notebooks are scratch.
+The first command opens the editor; the second opens the notebook as an app.
+The notebook walks through fitting one subject, comparing HMM zones with a
+smoothed median split, checking modelling choices, and comparing omission rates
+across subjects. It then uses signed reaction-time deviations to separate fast
+and slow responses. Buttons start the longer fits.
 
-On the cluster add `--headless --port 2718` and forward the port over ssh.
+The notebooks are plain Python files managed by marimo.
+`explore_vtc.py` plots the median split for one run;
+`zone_hmm_vs_median_split.py` provides a shorter comparison with the HMM.
 
-Dataset paths default to the copy on `/projectnb/nphfnirs`; override with
-`GRADCPT_ROOT` if you're working off a local copy.
+On the cluster, add `--headless --port 2718` to the marimo command and forward
+that port over SSH.
 
-## Zones from an HMM
+## Repository layout
 
-The in/out-of-the-zone measure smooths the VTC with a fixed Gaussian kernel
-and splits at the median. The kernel width sets the switching timescale by hand,
-and the median forces exactly half of every run out of the zone. `zones.py` fits an
-HMM to the VTC instead:
+```text
+src/fnirs_glmhmm/
+  config.py    dataset paths and analysis constants
+  io.py        parcel timeseries, event tables, and eyetracking
+  behavior.py  VTC smoothing, signed VTC, and median-split labels
+  zones.py     HMM fits to VTC and other per-trial features
+  neural.py    network features, task design, and nuisance regression
+  coupling.py  associations between neural states and behaviour
+  model.py     dynamax GLM-HMM wrappers
+  plotting.py  shared figure style and palette
+scripts/
+  fit_zones.py       zone HMMs, commission-error comparison, and BIC sweep
+  make_figdata.py    omission comparisons and descriptive CSVs
+  fit_neural_hmm.py  neural GLM-HMMs and cross-validation over state counts
+  neural_nulls.py    surrogate and circular-shift comparisons
+notebooks/           marimo notebooks
+tests/
+```
+
+Analysis outputs go to `results/`, which is gitignored. Local analysis notes may
+also be kept in `results/findings.md`; that file is not included in this checkout.
+
+## Zones from reaction-time variability
+
+The variance time course (VTC) is the absolute standardised reaction-time
+deviation, with filled values on trials without a response. Large VTC can reflect
+either a fast or a slow response.
+
+The median-split measure smooths VTC with a Gaussian filter and labels values
+above the run's median as out of the zone. The filter affects the duration of
+the resulting blocks, and the split assigns roughly half the trials to each zone.
+
+The HMM estimates emission distributions and transition probabilities from
+unsmoothed VTC. These describe the values within each state and how persistent
+the states are.
 
 ```python
 from fnirs_glmhmm import io
 from fnirs_glmhmm.zones import compare_to_median_split, fit_zone_hmm
 
 vtc = [e["VTC"].to_numpy() for e in io.load_all_events("sub-629")]
+fit = fit_zone_hmm(vtc, num_states=2)
 
-fit = fit_zone_hmm(vtc, num_states=2)  # runs share parameters
-fit.states()  # Viterbi path per run, 0 = most in the zone
-fit.out_of_zone_prob()  # graded P(out) per trial; prefer this to the hard label
-fit.expected_dwell  # trials per state, straight off the transition matrix
+fit.states()            # most likely state path for each run
+fit.out_of_zone_prob()   # probability of the highest-VTC state at each trial
+fit.expected_dwell      # expected consecutive trials per state
 
 compare_to_median_split(fit, vtc)
 ```
 
-States are always relabelled by ascending VTC, so state 0 means the same thing for
-every subject. `zones.state_sweep` fits a range of state counts and each fit
-exposes `.bic()`.
+States are ordered by ascending emission mean. For unsigned VTC, state 0 has the
+smallest deviations. With more than two states, the binary comparison treats the
+highest-VTC state as out of the zone and combines the rest.
 
-VTC is a non-negative skewed deviation score, so `transform="log"` (log1p +
-z-score, Gaussian emissions) is the default. `transform="gamma"` fits a GammaHMM on
-the raw values if you'd rather not transform.
+The default `transform="log"` applies log1p and standardises each run before
+fitting Gaussian emissions. `transform="zscore"` standardises without the log;
+`transform="gamma"` fits Gamma emissions on the VTC scale, adding a small offset
+if zeros are present. `zones.state_sweep` fits several state counts, and each
+fit exposes `.bic()` for comparison within the same transform.
 
-### The absolute value
+Runs share fitted parameters. They are concatenated during fitting, introducing
+an artificial transition at each boundary, then decoded separately. State
+probabilities use the full run, so they describe the recorded data rather than
+provide a forecast.
 
-VTC is |z(RT)|: a fast trial and a slow trial of the same size are one number, in one
-state. Out of the zone means variable, not slow.
+### Keep the direction of the deviation
 
-`behavior.signed_vtc` puts the sign back. `abs()` of it reproduces the `VTC` column to
-4e-4 on all 62 runs, which pinned down two upstream conventions: mean and sd include
-non-responses at RT = 0, and a non-response trial copies the previous responded trial
-forward rather than being interpolated, so an omission inherits the deviation before it.
+`behavior.signed_vtc` reconstructs the standardised deviations before the
+absolute value. Negative values are faster and positive values slower relative
+to the mean used for standardisation.
 
 ```python
 from fnirs_glmhmm.behavior import signed_vtc
 
 signed = [signed_vtc(e) for e in io.load_all_events("sub-629")]
-fit = fit_zone_hmm(signed, num_states=3, transform="none")  # fast / on pace / slow
+fit = fit_zone_hmm(signed, num_states=3, transform="none")
 ```
 
-`transform="none"` passes the series through; it is already standardised, and re-centring
-would move the fast/slow boundary off zero.
+This reconstruction includes RT = 0 non-responses in the mean and standard
+deviation. It then fills non-response trials with the most recent responded
+trial's deviation, using the first response for any leading non-responses.
+The notebook checks the reconstructed absolute values against the supplied VTC.
 
-Split that way, omissions are slow-only: slowest state +0.039 (p = 0.0005) against +0.023
-folded, fastest state -0.006. Details in `results/findings.md`.
+`transform="none"` preserves the signed scale and its zero point. States are
+still ordered by mean, so state 0 now has the lowest signed deviation. When
+comparing omission rates, remember that an omission's VTC comes from another
+trial's response.
 
-## GLM-HMM
+### Batch zone analyses
+
+```bash
+uv run python scripts/fit_zones.py
+uv run python scripts/make_figdata.py
+```
+
+The first script writes `results/zone_hmm_vs_split.csv`, including a BIC sweep
+and commission-error rates. It uses subject-level worker processes, with the
+default worker count based on `NSLOTS`.
+
+The second uses 12 workers and writes omission comparisons, autocorrelations,
+dwell times, and example traces to `results/figdata/`. If the first script's
+output is present, it also copies the BIC columns into `bic.csv`.
+
+## GLM-HMM interface
+
+A GLM-HMM lets the relationship between inputs and observations vary by state.
+For example, the logistic model below uses a design matrix to model a binary
+observation such as a zone label.
 
 ```python
 from fnirs_glmhmm import model
 
 fit = model.fit_glm_hmm(
-    emissions=y,  # e.g. zone label per trial
-    inputs=design,  # (n_trials, n_features)
+    emissions=y,       # binary observations
+    inputs=design,     # (n_trials, n_features)
     num_states=3,
     kind="logistic",
 )
@@ -122,49 +164,58 @@ states = fit.most_likely_states(y, inputs=design)
 
 ## Neural GLM-HMM
 
-The model that matters is fit to the fNIRS timeseries, not to behaviour:
+The neural analysis models fNIRS network activity with a separate baseline and
+task response for each state:
 
-    z_n ~ Markov(K states)
-    y_n | z_n = k  ~  N(A_k x_n + b_k, Sigma_k)
+```text
+z_n ~ Markov(K states)
+y_n | z_n = k ~ N(A_k x_n + b_k, Sigma_k)
+```
 
-`y_n` is network activity, `b_k` is a state's baseline network configuration, `A_k`
-is its task response gain, and `x_n` is the HRF-convolved task. Behaviour never
-enters the fit, so scoring states against behaviour afterwards is out of sample.
+Here `y_n` is network activity, `x_n` contains the task regressors, `b_k` is the
+state's baseline, and `A_k` gives its task-response coefficients.
+The observations are neural signals, but the inputs include commission errors,
+correct rejections, and reaction times. Later comparisons with behaviour are
+therefore associations within the recorded data; they are not independent
+held-out behavioural validation.
 
 ```python
-from fnirs_glmhmm import coupling, neural
+from fnirs_glmhmm import neural
 
-runs = neural.prepare_subject("sub-629")  # one RunData per usable run
+runs = neural.prepare_subject("sub-629")
 y, x, meta = neural.stack(runs)  # (n_runs, T, 14) and (n_runs, T, 3)
 ```
 
-Features are seven Yeo networks x two chromophores. Limbic is dropped (the median
-subject has one covered parcel there, eight have none) and TempPar is kept separate
-rather than folded into Default, which is what lands the count on 14. Per subject,
-parcels are masked at HbO sd > 1e-7, averaged within network, bandpassed
-0.01-0.2 Hz, resampled to 1 Hz, residualised on the global signal and a DCT drift
-basis, then z-scored per run.
+The 14 features are seven network averages for each of two chromophores, HbO
+and HbR. Limbic is excluded because of sparse coverage; TempPar is kept separate
+from Default. Parcels must have HbO standard deviation above 1e-7 in every run.
+The pipeline averages covered parcels by network, filters at 0.01-0.2 Hz,
+resamples to 1 Hz, removes global-signal and DCT drift terms, and standardises
+each run.
 
-Inputs are `commission`, `correct_rejection` and `rt_mod`. The plan's `nogo`
-regressor is absent on purpose: every mountain trial is either a commission error or
-a correct rejection, so it is exactly the sum of the first two and the design would
-be singular. Recover it as their sum.
+The three task inputs are `commission`, `correct_rejection`, and `rt_mod`,
+convolved with a haemodynamic response function. A separate no-go regressor
+would be redundant with the commission and correct-rejection regressors.
 
-**Models are fit per subject.** Nothing is pooled: each subject picks their own K by
-leaving out one of their own runs, and the group claim is a test across per-subject
-effects. States are comparable across subjects only through their DMN baseline, so
-the highest- and lowest-`Default_HbO` states are what get carried up.
+Each subject gets their own model. The script chooses K among the multi-state
+candidates using leave-one-run-out likelihood and also scores a one-state
+regression baseline. It still fits the selected multi-state model when the
+baseline scores better; `cv_gain` records that comparison.
 
-Covariances are diagonal (`--cov diag`, the default). At D = 14 a full covariance is
-105 parameters per state against ~700 training samples with lag-1 autocorrelation
-near 0.95, and it does not cross-validate: held-out likelihood comes out several
-times worse than the one-state baseline. The K sweep includes that one-state
-baseline as k = 1, so "no state structure" can win outright.
+States are ordered by their `Default_HbO` baseline, allowing comparisons of
+the highest- and lowest-baseline states across subjects. This ordering does not
+establish that their full network profiles are equivalent.
+
+Diagonal covariance is the default (`--cov diag`), estimating 14 variances per
+state. A full covariance estimates 105 entries per state and can be explored
+with `--cov full`.
 
 ```bash
-uv run python scripts/fit_neural_hmm.py    # per-subject fits, K sweep, coupling
-uv run python scripts/neural_nulls.py      # AR surrogate and circular-shift nulls
-uv run python scripts/figures/fig6_neural_k_selection.py
+uv run python scripts/fit_neural_hmm.py
+uv run python scripts/neural_nulls.py
 ```
 
-Both write to `results/neural/`. The nulls script reads the fits, so run it second.
+Both scripts write to `results/neural/`. Run the fit first: the nulls script
+reads its saved models. The null comparisons use autoregressive and
+phase-randomised surrogates to assess fitted structure, and circular shifts to
+assess alignment between state probabilities and behaviour.

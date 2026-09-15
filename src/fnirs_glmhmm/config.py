@@ -14,11 +14,11 @@ PARCEL_FILE_TEMPLATE = (
     "{sub}_task-gradCPT_adot-probe_spatialdim-vertex_IR_ts_{variant}_lR-1e-5_v26.pkl"
 )
 
-# ols was TDDR + 0.5 Hz lowpass before projection to parcel space; ar_irls was raw.
-# Laura can confirm this
+# Preprocessing notes to confirm with Laura: ols used TDDR and a 0.5 Hz lowpass
+# before parcel projection; ar_irls used raw input.
 VARIANTS = ("ols", "ar_irls")
 
-# Parcels that come along for the ride but are not cortex.
+# Non-cortical entries excluded from parcel analyses.
 NON_CORTICAL_PARCELS = ("Background+FreeSurfer_Defined_Medial_Wall", "scalp")
 
 # Where analysis output goes. Both are gitignored.

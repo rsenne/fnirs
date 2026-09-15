@@ -1,12 +1,11 @@
-"""Network-level fNIRS features and task design for the neural GLM-HMM.
+"""Prepare network-level fNIRS observations and task inputs for the GLM-HMM.
 
-Everything between the cedalion parcel pickles and the (emissions, inputs) pair
-dynamax wants: probe-coverage masking, aggregation to Yeo networks, filtering and
-downsampling, the HRF-convolved task design, and nuisance regression.
+The pipeline masks parcels by probe coverage, averages them into networks,
+filters and resamples the signals, and removes nuisance terms. The task design
+uses commission errors, correct rejections, and reaction times, convolved with
+a haemodynamic response function.
 
-The model is fit to the neural timeseries with the task as input, so behaviour
-never enters the features. Event tables ride along on `RunData` only because the
-validation needs to map trials back onto neural samples.
+RunData retains event tables for later alignment of trials and neural samples.
 """
 
 import pickle
@@ -21,9 +20,8 @@ from scipy.stats import gamma
 
 from fnirs_glmhmm import io
 
-# Schaefer 17-network prefixes to Yeo-7. TempPar has no Yeo-7 home and is kept as
-# its own feature rather than folded into Default, so the DMN feature that the
-# main hypothesis rests on stays clean.
+# Map Schaefer network prefixes to Yeo-7 groups, keeping TempPar separate
+# from Default for the network-level comparisons.
 YEO7 = {
     "VisCent": "Vis",
     "VisPeri": "Vis",
@@ -138,10 +136,8 @@ def _sticks(onsets, t: np.ndarray, amplitudes=None) -> np.ndarray:
 def design_matrix(events: pd.DataFrame, t: np.ndarray, fs: float) -> np.ndarray:
     """HRF-convolved task regressors on the native neural timebase, (n_samples, 3).
 
-    The plan's `nogo` regressor is deliberately absent. Every mountain trial is
-    either a commission error or a correct rejection, so nogo is exactly the sum
-    of the two columns here and the four-column design is singular. Recover the
-    no-go main effect afterwards as a weighted sum of the two.
+    Commission errors and correct rejections cover all mountain trials.
+    A separate no-go column would be their sum, making the design rank-deficient.
 
     `rt_mod` is go trials only, amplitude-modulated by log RT z-scored within the
     run. Omissions carry no RT (the column is 0, not NaN) so they are left out.
@@ -171,12 +167,11 @@ def bandpass(x: np.ndarray, fs: float, band=BAND, order: int = 4) -> np.ndarray:
 def resample_window(
     x: np.ndarray, t: np.ndarray, t0: float, window_s: float, target_fs: float
 ) -> np.ndarray:
-    """Crop to `window_s` from `t0` and land on a uniform grid at `target_fs`.
+    """Interpolate a window starting at `t0` onto a uniform grid at `target_fs`.
 
-    Plain interpolation is enough: the signal is already lowpassed at 0.2 Hz, well
-    under the 0.5 Hz Nyquist of the 1 Hz grid, so there is nothing left to alias.
-    Cropping happens after filtering so the filter's edge transients stay outside
-    the analysis window.
+    Callers should filter before resampling. The default pipeline uses a 0.2 Hz
+    upper cutoff before resampling to 1 Hz. Filtering precedes cropping to reduce
+    edge effects within the analysis window.
     """
     grid = t0 + np.arange(round(window_s * target_fs)) / target_fs
     x = np.atleast_2d(x)
@@ -193,9 +188,10 @@ def dct_basis(n: int, dt: float, cutoff: float = DRIFT_CUTOFF) -> np.ndarray:
 
 
 def regress_out(y: np.ndarray, z: np.ndarray) -> np.ndarray:
-    """Residualise columns of `y` on `z`, with an intercept. Weights are shared
-    across states by construction, which is the whole point of doing this here
-    rather than handing the nuisance regressors to the HMM as inputs."""
+    """Remove a linear fit of `z` from each column of `y`, including an intercept.
+
+    Nuisance coefficients are estimated before the HMM and shared across states.
+    """
     if z.shape[1] == 0:
         return y - y.mean(axis=0)
     design = np.column_stack([np.ones(len(z)), z])

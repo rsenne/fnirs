@@ -1,14 +1,11 @@
-"""Attentional zones from an HMM on the VTC, as an alternative to the median split.
+"""HMM fits to VTC as an alternative to smoothed median-split zone labels.
 
-The standard approach smooths the VTC with a fixed Gaussian kernel and thresholds
-at the median. Both choices are arbitrary: the kernel width sets the timescale by
-hand, and the median forces exactly half the trials out of the zone regardless of
-how the subject actually behaved. An HMM learns the boundary from the emission
-means, gives a graded posterior instead of a hard label, and picks its own
-timescale.
+The median split uses a fixed smoothing filter and a within-run threshold.
+The HMM estimates emission distributions and transition probabilities, providing
+both a decoded state path and state probabilities.
 
-Pass the raw VTC. Smoothing first hands the kernel's autocorrelation back to the
-model and costs accuracy against omission errors; see results/findings.md.
+Pass unsmoothed VTC for the main comparison. Smoothing changes the temporal
+dependence seen by the model. The reproduction notebook compares both choices.
 """
 
 from dataclasses import dataclass, field
@@ -25,8 +22,10 @@ from fnirs_glmhmm.behavior import smooth_vtc, zone_labels
 class ZoneFit:
     """A fitted zone HMM with states relabelled low VTC -> high VTC.
 
-    State 0 is always the most "in the zone" state, so parameters are comparable
-    across subjects without hand-matching.
+    State 0 has the lowest emission mean. For unsigned VTC this represents the
+    smallest deviations; for signed VTC it represents the fastest relative responses.
+    Sorting gives consistent labels, but does not make fitted parameters identical
+    in meaning across subjects.
     """
 
     model: object
@@ -101,11 +100,11 @@ class ZoneFit:
 
 
 def prepare_vtc(vtc, transform: str = "log") -> np.ndarray:
-    """VTC is a non-negative, right-skewed deviation score, so it needs handling.
+    """Prepare one run's observations for the chosen emission model.
 
-    log     - log1p then z-score, then a Gaussian HMM is reasonable
-    zscore  - z-score only; leaves the skew in
-    gamma   - raw positive values for a GammaHMM
+    log     - log1p then z-score
+    zscore  - z-score without changing skewness
+    gamma   - VTC values, with a small offset if any value is non-positive
     none    - pass through, for an already standardised series such as behavior.signed_vtc,
               where re-centring would move the fast/slow boundary off zero
     """
@@ -136,10 +135,9 @@ def fit_zone_hmm(
 ) -> ZoneFit:
     """Fit a zone HMM to one run or to all of a subject's runs jointly.
 
-    Runs share parameters but are concatenated rather than batched, because runs
-    are rarely the same length and dynamax has no masking. That introduces one
-    artificial transition per run boundary, which is negligible against a few
-    hundred trials per run.
+    Runs share parameters and are concatenated to accommodate different lengths.
+    This introduces one artificial transition per run boundary during fitting.
+    Decoding is performed separately for each run.
     """
     if isinstance(vtc_runs, np.ndarray) and vtc_runs.ndim == 1:
         vtc_runs = [vtc_runs]
@@ -147,7 +145,7 @@ def fit_zone_hmm(
         vtc_runs = [np.asarray(vtc_runs)]
 
     lengths = [len(np.asarray(v)) for v in vtc_runs]
-    # Normalise per run so a run with an overall slower RT doesn't look out of zone throughout.
+    # Apply the selected transform separately to each run before concatenating.
     prepared = np.concatenate([prepare_vtc(v, transform) for v in vtc_runs])
 
     # GammaHMM takes scalar emissions; the Gaussian one wants a trailing dim.
@@ -155,8 +153,7 @@ def fit_zone_hmm(
     emissions = jnp.asarray(prepared if gamma else prepared[:, None])
     init_method = "prior" if gamma else "kmeans"
 
-    # Build once, not per restart: a fresh model object retraces and recompiles,
-    # which on a single-core node costs far more than the EM itself.
+    # Reuse the model across restarts to avoid repeated JAX tracing and compilation.
     model = (
         GammaHMM(num_states, transition_matrix_stickiness=stickiness)
         if gamma
@@ -247,15 +244,15 @@ def fit_state_hmm(
 
 
 def state_sweep(vtc_runs, state_range=(2, 3, 4), **kwargs) -> dict[int, ZoneFit]:
-    """Fit several state counts so you can look at BIC before committing."""
+    """Fit the same observations at several state counts for comparison."""
     return {k: fit_zone_hmm(vtc_runs, num_states=k, **kwargs) for k in state_range}
 
 
 def compare_to_median_split(fit: ZoneFit, vtc_runs, smooth_length: int = 20) -> dict:
     """Occupancy, switch counts and agreement against the smoothed median split.
 
-    Agreement is computed against the HMM's binary in/out collapse (highest-VTC
-    state vs the rest), so it only makes sense for small state counts.
+    Agreement uses a binary label: the highest-VTC state versus all other states.
+    Changing the state count can change how many trials enter the highest state.
     """
     if isinstance(vtc_runs, np.ndarray) and vtc_runs.ndim == 1:
         vtc_runs = [vtc_runs]
