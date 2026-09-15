@@ -18,6 +18,7 @@ dependencies = [
     "matplotlib>=3.9",
     "seaborn>=0.13",
     "tqdm>=4.66",
+    "pint>=0.25.3",
 ]
 
 [dependency-groups]

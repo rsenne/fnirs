@@ -13,8 +13,36 @@ from dynamax.hidden_markov_model import (
     LinearRegressionHMM,
     LogisticRegressionHMM,
 )
+from dynamax.hidden_markov_model.models.linreg_hmm import LinearRegressionHMMEmissions
+from jax import vmap
 
-EmissionKind = Literal["logistic", "categorical", "gaussian", "bernoulli"]
+EmissionKind = Literal["logistic", "categorical", "gaussian", "gaussian_diag", "bernoulli"]
+
+VARIANCE_FLOOR = 1e-4
+
+
+class _DiagonalEmissions(LinearRegressionHMMEmissions):
+    """Linear regression emissions with the covariance constrained to diagonal.
+
+    The ML diagonal covariance is just the diagonal of the unconstrained one (the
+    weights do not depend on Sigma), so constraining it is a one-line change to the
+    M-step. It costs D params per state instead of D(D+1)/2, which is the difference
+    between a fittable and an unfittable model when a single subject supplies a few
+    hundred effectively-independent samples.
+    """
+
+    def m_step(self, params, props, batch_stats, m_step_state):
+        params, m_step_state = super().m_step(params, props, batch_stats, m_step_state)
+        var = jnp.maximum(jnp.einsum("kii->ki", params.covs), VARIANCE_FLOOR)
+        return params._replace(covs=vmap(jnp.diag)(var)), m_step_state
+
+
+class DiagonalLinearRegressionHMM(LinearRegressionHMM):
+    """LinearRegressionHMM with diagonal emission covariances."""
+
+    def __init__(self, num_states, input_dim, emission_dim, **kwargs):
+        super().__init__(num_states, input_dim, emission_dim, **kwargs)
+        self.emission_component = _DiagonalEmissions(num_states, input_dim, emission_dim)
 
 
 @dataclass
@@ -43,6 +71,16 @@ class Fit:
     def transition_matrix(self) -> np.ndarray:
         return np.asarray(self.params.transitions.transition_matrix)
 
+    def marginal_log_prob(self, emissions, inputs=None) -> np.ndarray:
+        """Log likelihood per sequence. Held-out data goes through here."""
+        emissions = jnp.asarray(emissions)
+        inputs = None if inputs is None else jnp.asarray(inputs)
+        if emissions.ndim == 2:
+            return np.asarray(self.model.marginal_log_prob(self.params, emissions, inputs))
+        return np.asarray(
+            vmap(lambda e, u: self.model.marginal_log_prob(self.params, e, u))(emissions, inputs)
+        )
+
 
 def build_model(
     kind: EmissionKind,
@@ -54,10 +92,11 @@ def build_model(
 ):
     """Pick the dynamax model that matches the observation you're predicting.
 
-    logistic   - binary behaviour (e.g. in vs out of the zone)
-    categorical- discrete behaviour with >2 outcomes
-    gaussian   - continuous emissions, e.g. parcel timeseries given a design matrix
-    bernoulli  - binary emissions with no covariates (plain HMM, ignores inputs)
+    logistic      - binary behaviour (e.g. in vs out of the zone)
+    categorical   - discrete behaviour with >2 outcomes
+    gaussian      - continuous emissions, e.g. parcel timeseries given a design matrix
+    gaussian_diag - the same with diagonal covariances, for short sessions
+    bernoulli     - binary emissions with no covariates (plain HMM, ignores inputs)
     """
     if kind == "logistic":
         return LogisticRegressionHMM(num_states, input_dim, transition_matrix_stickiness=stickiness)
@@ -67,6 +106,10 @@ def build_model(
         )
     if kind == "gaussian":
         return LinearRegressionHMM(
+            num_states, input_dim, emission_dim, transition_matrix_stickiness=stickiness
+        )
+    if kind == "gaussian_diag":
+        return DiagonalLinearRegressionHMM(
             num_states, input_dim, emission_dim, transition_matrix_stickiness=stickiness
         )
     if kind == "bernoulli":
@@ -83,12 +126,15 @@ def fit_glm_hmm(
     num_iters: int = 200,
     seed: int = 0,
     stickiness: float = 0.0,
+    init_method: str = "prior",
     verbose: bool = False,
 ) -> Fit:
     """EM with several random inits; keeps the run with the best log likelihood.
 
     `emissions` and `inputs` are either (T, D) for one session or (N, T, D) for a
-    batch of equal-length sessions.
+    batch of equal-length sessions. `init_method="kmeans"` seeds the emission
+    means from a clustering of the data, which matters for continuous emissions
+    where a prior draw can start miles from the data.
     """
     emissions = jnp.asarray(emissions)
     inputs = None if inputs is None else jnp.asarray(inputs)
@@ -97,11 +143,15 @@ def fit_glm_hmm(
     emission_dim = emissions.shape[-1] if emissions.ndim > 1 else 1
     num_classes = int(emissions.max()) + 1 if kind == "categorical" else 2
 
+    # Build once: a fresh model object retraces and recompiles, which costs more
+    # than the EM itself.
+    model = build_model(kind, num_states, input_dim, emission_dim, num_classes, stickiness)
+    init_kwargs = {"emissions": emissions} if init_method == "kmeans" else {}
+
     best = None
     for i in range(num_restarts):
         key = jr.PRNGKey(seed + i)
-        model = build_model(kind, num_states, input_dim, emission_dim, num_classes, stickiness)
-        params, props = model.initialize(key)
+        params, props = model.initialize(key, method=init_method, **init_kwargs)
         params, lps = model.fit_em(
             params, props, emissions, inputs=inputs, num_iters=num_iters, verbose=verbose
         )
@@ -109,6 +159,31 @@ def fit_glm_hmm(
         if best is None or fit.final_log_prob > best.final_log_prob:
             best = fit
     return best
+
+
+def no_state_log_prob(
+    y_train, x_train, y_test, x_test, diagonal: bool = True
+) -> float:
+    """Held-out log likelihood of the one-state baseline: a plain linear regression.
+
+    dynamax cannot represent a one-state HMM (its Dirichlet transition prior needs
+    at least two categories), and this is the number every K > 1 model has to beat
+    before any of its states mean anything.
+    """
+    flat = lambda a: np.asarray(a).reshape(-1, np.asarray(a).shape[-1])  # noqa: E731
+    ytr, xtr, yte, xte = flat(y_train), flat(x_train), flat(y_test), flat(x_test)
+
+    design = np.column_stack([np.ones(len(xtr)), xtr])
+    beta, *_ = np.linalg.lstsq(design, ytr, rcond=None)
+    resid = ytr - design @ beta
+    cov = resid.T @ resid / len(resid)
+    if diagonal:
+        cov = np.diag(np.maximum(np.diag(cov), VARIANCE_FLOOR))
+
+    err = yte - np.column_stack([np.ones(len(xte)), xte]) @ beta
+    sign, logdet = np.linalg.slogdet(cov)
+    quad = np.einsum("ij,jk,ik->i", err, np.linalg.inv(cov), err)
+    return float(-0.5 * (quad + logdet + err.shape[1] * np.log(2 * np.pi)).sum())
 
 
 def state_sweep(

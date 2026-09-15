@@ -106,8 +106,12 @@ def prepare_vtc(vtc, transform: str = "log") -> np.ndarray:
     log     - log1p then z-score, then a Gaussian HMM is reasonable
     zscore  - z-score only; leaves the skew in
     gamma   - raw positive values for a GammaHMM
+    none    - pass through, for an already standardised series such as behavior.signed_vtc,
+              where re-centring would move the fast/slow boundary off zero
     """
     v = np.asarray(vtc, dtype=float)
+    if transform == "none":
+        return v
     if transform == "log":
         v = np.log1p(v)
         return (v - v.mean()) / v.std()

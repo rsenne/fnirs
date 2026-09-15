@@ -1,4 +1,4 @@
-"""VTC smoothing and in/out-of-the-zone labelling."""
+"""VTC smoothing, the signed VTC, and in/out-of-the-zone labelling."""
 
 import numpy as np
 import pandas as pd
@@ -13,6 +13,31 @@ def smooth_vtc(vtc: np.ndarray | pd.Series, length: int = 20) -> np.ndarray:
     vtc = np.asarray(vtc, dtype=float)
     w = windows.gaussian(length, std=length / 2) / 2
     return filtfilt(w, np.sum(w), vtc)
+
+
+def signed_vtc(events: pd.DataFrame, rt_col: str = "reaction_time") -> np.ndarray:
+    """VTC before the absolute value. Negative is fast, positive is slow.
+
+    The `VTC` column is |z(RT)| under two conventions, both of which have to be matched or
+    the sign lands on the wrong magnitude:
+
+    - mean and sd include non-responses at RT = 0, so the centre sits below the
+      responded-trial mean and the sd is wide;
+    - non-response trials copy the previous responded trial forward, not interpolated.
+
+    `abs(signed_vtc(e))` then reproduces `e["VTC"]` to 4e-4 on all 62 runs, its rounding.
+    Fit the result with `zones.fit_zone_hmm(..., transform="none")`.
+    """
+    rt = events[rt_col].to_numpy(dtype=float)
+    responded = rt > 0
+    if not responded.any():
+        raise ValueError("no responded trials, nothing to centre on")
+
+    z = (rt - rt.mean()) / rt.std(ddof=0)
+    idx = np.arange(len(rt))
+    src = np.maximum.accumulate(np.where(responded, idx, -1))
+    src[src < 0] = idx[responded][0]  # a run starting on a non-response has nothing behind it
+    return z[src]
 
 
 def zone_labels(

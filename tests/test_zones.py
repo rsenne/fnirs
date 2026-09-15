@@ -31,7 +31,7 @@ def test_recovers_synthetic_zone_states():
 def test_states_are_ordered_by_vtc():
     rng = np.random.default_rng(0)
     vtc, _ = synthetic_vtc(rng)
-    for transform in ("log", "zscore", "gamma"):
+    for transform in ("log", "zscore", "gamma", "none"):
         fit = fit_zone_hmm(vtc, num_states=3, transform=transform, num_restarts=3, num_iters=60)
         means = fit.state_means
         assert np.all(np.diff(means) > 0), f"{transform}: {means}"
